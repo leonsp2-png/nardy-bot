@@ -127,6 +127,10 @@ async def confirm_add_player(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if query.data == "cancel_add":
         await query.edit_message_text("❌ Отменено")
+        await update.effective_chat.send_message(
+            "Главное меню:",
+            reply_markup=get_main_keyboard()
+        )
         return ConversationHandler.END
     
     player_name = context.user_data.get('new_player_name', '')
@@ -137,10 +141,18 @@ async def confirm_add_player(update: Update, context: ContextTypes.DEFAULT_TYPE)
         session.add(player)
         session.commit()
         await query.edit_message_text(f"✅ Игрок «{player_name}» добавлен!")
+        await update.effective_chat.send_message(
+            "Главное меню:",
+            reply_markup=get_main_keyboard()
+        )
         logger.info(f"Добавлен игрок: {player_name}")
     except Exception as e:
         logger.error(f"Ошибка добавления: {e}")
         await query.edit_message_text("❌ Ошибка.")
+        await update.effective_chat.send_message(
+            "Главное меню:",
+            reply_markup=get_main_keyboard()
+        )
     finally:
         session.close()
     
