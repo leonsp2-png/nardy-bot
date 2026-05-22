@@ -48,11 +48,124 @@ def get_main_keyboard():
         [KeyboardButton("📋 Последние игры")]
     ], resize_keyboard=True)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎲 Бот для учета игр в нарды!\n\n• Победа = +1 очко\n• Марс = +2 очка\n\nИспользуйте кнопки ниже:",
-        reply_markup=get_main_keyboard()
-    )
+def get_or_create_player(session, name):
+    """Найти или создать игрока"""
+    player = session.query(Player).filter_by(username=name).first()
+    if not player:
+        player = Player(username=name)
+        session.add(player)
+        session.flush()
+    return player
+
+# ========== ИМПОРТ ИСТОРИЧЕСКИХ ДАННЫХ ==========
+
+async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Команда для загрузки исторических данных.
+    Формат: /import Игрок1-Игрок2 Счет1-Счет2, Игрок3-Игрок4 Счет3-Счет4, ...
+    Пример: /import сергей-коля 20-10, иван-андрей 40-23, коля-иван 10-20, андрей-сергей 13-8
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Формат: /import Игрок1-Игрок2 Счет1-Счет2, ...\n\n"
+            "Пример:\n"
+            "/import сергей-коля 20-10, иван-андрей 40-23, коля-иван 10-20, андрей-сергей 13-8",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Собираем весь текст после команды
+    raw = ' '.join(context.args)
+    
+    # Разбиваем на пары по запятой
+    pairs = [p.strip() for p in raw.split(',') if p.strip()]
+    
+    if not pairs:
+        await update.message.reply_text("❌ Не указаны данные для импорта.", reply_markup=get_main_keyboard())
+        return
+    
+    session = Session()
+    imported = 0
+    errors = []
+    
+    try:
+        for pair in pairs:
+            # Разбиваем "сергей-коля 20-10" на части
+            parts = pair.split()
+            if len(parts) != 2:
+                errors.append(f"❌ Неверный формат: «{pair}»")
+                continue
+            
+            names_part = parts[0]  # "сергей-коля"
+            scores_part = parts[1]  # "20-10"
+            
+            names = names_part.split('-')
+            scores = scores_part.split('-')
+            
+            if len(names) != 2 or len(scores) != 2:
+                errors.append(f"❌ Неверный формат: «{pair}»")
+                continue
+            
+            name1, name2 = names[0].strip(), names[1].strip()
+            
+            try:
+                score1 = int(scores[0].strip())
+                score2 = int(scores[1].strip())
+            except ValueError:
+                errors.append(f"❌ Неверный счет в: «{pair}»")
+                continue
+            
+            # Получаем или создаем игроков
+            p1 = get_or_create_player(session, name1)
+            p2 = get_or_create_player(session, name2)
+            
+            # Определяем победителя
+            if score1 > score2:
+                winner_id = p1.id
+            elif score2 > score1:
+                winner_id = p2.id
+            else:
+                winner_id = None  # ничья
+            
+            # Сохраняем игру
+            game = Game(
+                player1_id=p1.id,
+                player2_id=p2.id,
+                winner_id=winner_id,
+                is_mars=0,
+                points_p1=score1,
+                points_p2=score2
+            )
+            session.add(game)
+            
+            # Обновляем статистику
+            p1.games_played += 1
+            p2.games_played += 1
+            p1.points += score1
+            p2.points += score2
+            
+            if winner_id == p1.id:
+                p1.games_won += 1
+            elif winner_id == p2.id:
+                p2.games_won += 1
+            
+            imported += 1
+        
+        session.commit()
+        
+        result_text = f"✅ Импортировано игр: {imported}"
+        if errors:
+            result_text += "\n\nОшибки:\n" + "\n".join(errors)
+        
+        await update.message.reply_text(result_text, reply_markup=get_main_keyboard())
+        logger.info(f"Импортировано {imported} игр")
+        
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка импорта: {e}")
+        await update.message.reply_text(f"❌ Ошибка импорта: {e}", reply_markup=get_main_keyboard())
+    finally:
+        session.close()
 
 # ========== ГЛАВНОЕ МЕНЮ ==========
 
@@ -63,7 +176,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await game_start(update, context)
     elif text == "➕ Добавить игрока":
         await update.message.reply_text("Введите имя нового игрока:", reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True))
-        return 1  # ADD_PLAYER_NAME
+        return 1
     elif text == "📊 Турнирная таблица":
         await show_table(update, context)
     elif text == "👥 Список игроков":
@@ -94,7 +207,7 @@ async def add_player_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("✅ Да, добавить", callback_data="add_yes"),
                  InlineKeyboardButton("❌ Нет", callback_data="add_no")]]
     await update.message.reply_text(f"Добавить игрока «{name}»?", reply_markup=InlineKeyboardMarkup(keyboard))
-    return 2  # CONFIRM_ADD
+    return 2
 
 async def add_player_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -256,7 +369,6 @@ async def confirm_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mt = " (МАРС!)" if mars else ""
         wt = f"Победитель: 🎉 {w.username}{mt}" if w else ""
         await query.edit_message_text(f"✅ Сохранено!\n\n{p1.username} {pp1} - {pp2} {p2.username}\n{wt}")
-        logger.info(f"Игра: {p1.username} {pp1}-{pp2} {p2.username}")
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
@@ -335,6 +447,10 @@ async def show_last_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Команда импорта
+    app.add_handler(CommandHandler("import", import_data))
+    
+    # Команда старт
     app.add_handler(CommandHandler("start", start))
     
     # Добавление игрока
