@@ -49,7 +49,6 @@ def get_main_keyboard():
     ], resize_keyboard=True)
 
 def get_or_create_player(session, name):
-    """Найти или создать игрока"""
     player = session.query(Player).filter_by(username=name).first()
     if not player:
         player = Player(username=name)
@@ -57,14 +56,22 @@ def get_or_create_player(session, name):
         session.flush()
     return player
 
+# ========== START ==========
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎲 Бот для учета игр в нарды!\n\n"
+        "• Победа = +1 очко\n"
+        "• Марс = +2 очка\n\n"
+        "Команды:\n"
+        "/import — загрузить исторические данные\n\n"
+        "Используйте кнопки ниже:",
+        reply_markup=get_main_keyboard()
+    )
+
 # ========== ИМПОРТ ИСТОРИЧЕСКИХ ДАННЫХ ==========
 
 async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Команда для загрузки исторических данных.
-    Формат: /import Игрок1-Игрок2 Счет1-Счет2, Игрок3-Игрок4 Счет3-Счет4, ...
-    Пример: /import сергей-коля 20-10, иван-андрей 40-23, коля-иван 10-20, андрей-сергей 13-8
-    """
     if not context.args:
         await update.message.reply_text(
             "❌ Формат: /import Игрок1-Игрок2 Счет1-Счет2, ...\n\n"
@@ -74,14 +81,11 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Собираем весь текст после команды
     raw = ' '.join(context.args)
-    
-    # Разбиваем на пары по запятой
     pairs = [p.strip() for p in raw.split(',') if p.strip()]
     
     if not pairs:
-        await update.message.reply_text("❌ Не указаны данные для импорта.", reply_markup=get_main_keyboard())
+        await update.message.reply_text("❌ Не указаны данные.", reply_markup=get_main_keyboard())
         return
     
     session = Session()
@@ -90,17 +94,13 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         for pair in pairs:
-            # Разбиваем "сергей-коля 20-10" на части
             parts = pair.split()
             if len(parts) != 2:
                 errors.append(f"❌ Неверный формат: «{pair}»")
                 continue
             
-            names_part = parts[0]  # "сергей-коля"
-            scores_part = parts[1]  # "20-10"
-            
-            names = names_part.split('-')
-            scores = scores_part.split('-')
+            names = parts[0].split('-')
+            scores = parts[1].split('-')
             
             if len(names) != 2 or len(scores) != 2:
                 errors.append(f"❌ Неверный формат: «{pair}»")
@@ -112,33 +112,21 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 score1 = int(scores[0].strip())
                 score2 = int(scores[1].strip())
             except ValueError:
-                errors.append(f"❌ Неверный счет в: «{pair}»")
+                errors.append(f"❌ Неверный счет: «{pair}»")
                 continue
             
-            # Получаем или создаем игроков
             p1 = get_or_create_player(session, name1)
             p2 = get_or_create_player(session, name2)
             
-            # Определяем победителя
-            if score1 > score2:
-                winner_id = p1.id
-            elif score2 > score1:
-                winner_id = p2.id
-            else:
-                winner_id = None  # ничья
+            winner_id = p1.id if score1 > score2 else (p2.id if score2 > score1 else None)
             
-            # Сохраняем игру
             game = Game(
-                player1_id=p1.id,
-                player2_id=p2.id,
-                winner_id=winner_id,
-                is_mars=0,
-                points_p1=score1,
-                points_p2=score2
+                player1_id=p1.id, player2_id=p2.id,
+                winner_id=winner_id, is_mars=0,
+                points_p1=score1, points_p2=score2
             )
             session.add(game)
             
-            # Обновляем статистику
             p1.games_played += 1
             p2.games_played += 1
             p1.points += score1
@@ -153,17 +141,15 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         session.commit()
         
-        result_text = f"✅ Импортировано игр: {imported}"
+        result = f"✅ Импортировано игр: {imported}"
         if errors:
-            result_text += "\n\nОшибки:\n" + "\n".join(errors)
-        
-        await update.message.reply_text(result_text, reply_markup=get_main_keyboard())
+            result += "\n\nОшибки:\n" + "\n".join(errors)
+        await update.message.reply_text(result, reply_markup=get_main_keyboard())
         logger.info(f"Импортировано {imported} игр")
-        
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка импорта: {e}")
-        await update.message.reply_text(f"❌ Ошибка импорта: {e}", reply_markup=get_main_keyboard())
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=get_main_keyboard())
     finally:
         session.close()
 
@@ -204,8 +190,7 @@ async def add_player_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
     
     context.user_data['new_name'] = name
-    keyboard = [[InlineKeyboardButton("✅ Да, добавить", callback_data="add_yes"),
-                 InlineKeyboardButton("❌ Нет", callback_data="add_no")]]
+    keyboard = [[InlineKeyboardButton("✅ Да", callback_data="add_yes"), InlineKeyboardButton("❌ Нет", callback_data="add_no")]]
     await update.message.reply_text(f"Добавить игрока «{name}»?", reply_markup=InlineKeyboardMarkup(keyboard))
     return 2
 
@@ -243,7 +228,6 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [[InlineKeyboardButton(p.username, callback_data=f"s1_{p.id}")] for p in players]
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-        
         await update.message.reply_text("🎲 Выберите ПЕРВОГО игрока:", reply_markup=InlineKeyboardMarkup(keyboard))
         return CHOOSE_P1
     finally:
@@ -256,13 +240,11 @@ async def choose_p1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Отменено")
         return ConversationHandler.END
     
-    p1_id = int(query.data.split('_')[1])
-    context.user_data['p1'] = p1_id
-    
+    context.user_data['p1'] = int(query.data.split('_')[1])
     session = Session()
     try:
-        p1 = session.query(Player).get(p1_id)
-        players = session.query(Player).filter(Player.id != p1_id).order_by(Player.username).all()
+        p1 = session.query(Player).get(context.user_data['p1'])
+        players = session.query(Player).filter(Player.id != p1.id).order_by(Player.username).all()
         keyboard = [[InlineKeyboardButton(p.username, callback_data=f"s2_{p.id}")] for p in players]
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         await query.edit_message_text(f"Первый: {p1.username}\nВыберите ВТОРОГО игрока:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -277,13 +259,11 @@ async def choose_p2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Отменено")
         return ConversationHandler.END
     
-    p2_id = int(query.data.split('_')[1])
-    context.user_data['p2'] = p2_id
-    
+    context.user_data['p2'] = int(query.data.split('_')[1])
     session = Session()
     try:
         p1 = session.query(Player).get(context.user_data['p1'])
-        p2 = session.query(Player).get(p2_id)
+        p2 = session.query(Player).get(context.user_data['p2'])
         keyboard = [
             [InlineKeyboardButton(f"🏆 Победил {p1.username} (+1)", callback_data="r_win1")],
             [InlineKeyboardButton(f"⭐ Марс {p1.username} (+2)", callback_data="r_mars1")],
@@ -304,8 +284,6 @@ async def choose_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     data = query.data
-    context.user_data['result'] = data
-    
     session = Session()
     try:
         p1 = session.query(Player).get(context.user_data['p1'])
@@ -447,13 +425,9 @@ async def show_last_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Команда импорта
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("import", import_data))
     
-    # Команда старт
-    app.add_handler(CommandHandler("start", start))
-    
-    # Добавление игрока
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ Добавить игрока$"), menu_handler)],
         states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_player_name)],
@@ -461,7 +435,6 @@ def main():
         fallbacks=[MessageHandler(filters.Regex("^❌ Отмена$"), menu_handler)]
     ))
     
-    # Новая игра
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🎲 Добавить результат игры$"), menu_handler)],
         states={
