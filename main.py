@@ -38,6 +38,7 @@ Base.metadata.create_all(engine)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Состояния
 CHOOSE_P1, CHOOSE_P2, CHOOSE_RESULT, CONFIRM = range(4)
 ADD_NAME, ADD_CONFIRM = range(10, 12)
 
@@ -56,6 +57,21 @@ def get_or_create_player(session, name):
         session.add(player)
         session.flush()
     return player
+
+# ========== ОБРАБОТЧИК ОШИБОК ==========
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логируем ошибки и не даем боту упасть"""
+    logger.error(f"Ошибка: {context.error}")
+    try:
+        if update and hasattr(update, 'effective_chat'):
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Произошла ошибка. Попробуйте еще раз.",
+                reply_markup=get_main_keyboard()
+            )
+    except:
+        pass
 
 # ========== START ==========
 
@@ -113,19 +129,23 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             winner_id = p1.id if score1 > score2 else (p2.id if score2 > score1 else None)
             
-            session.add(Game(player1_id=p1.id, player2_id=p2.id, winner_id=winner_id,
-                           is_mars=0, points_p1=score1, points_p2=score2))
+            session.add(Game(
+                player1_id=p1.id, player2_id=p2.id,
+                winner_id=winner_id, is_mars=0,
+                points_p1=score1, points_p2=score2
+            ))
             
             p1.games_played += 1
             p2.games_played += 1
             p1.points += score1
             p2.points += score2
-            if winner_id == p1.id: p1.games_won += 1
-            elif winner_id == p2.id: p2.games_won += 1
+            if winner_id == p1.id:
+                p1.games_won += 1
+            elif winner_id == p2.id:
+                p2.games_won += 1
             imported += 1
         
         session.commit()
-        
         result = f"✅ Импортировано: {imported}"
         if errors:
             result += "\n\n" + "\n".join(errors)
@@ -137,18 +157,18 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-# ========== ОТМЕНА ИГРЫ ==========
+# ========== ВЫХОД ИЗ ДИАЛОГА ==========
 
-async def cancel_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выход из ConversationHandler"""
+async def cancel_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Полный выход из любого диалога"""
+    context.user_data.clear()
+    
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("❌ Отменено")
     elif update.message:
         await update.message.reply_text("❌ Отменено", reply_markup=get_main_keyboard())
     
-    # Очищаем данные
-    context.user_data.clear()
     return ConversationHandler.END
 
 # ========== ГЛАВНОЕ МЕНЮ ==========
@@ -160,7 +180,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await game_start(update, context)
     elif text == "➕ Добавить игрока":
         await update.message.reply_text(
-            "Введите имя игрока (или нажмите Отмена):",
+            "Введите имя игрока:",
             reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
         )
         return ADD_NAME
@@ -174,14 +194,16 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_last_games(update, context)
         return ConversationHandler.END
     elif text == "❌ Отмена":
-        await update.message.reply_text("❌ Отменено", reply_markup=get_main_keyboard())
+        await update.message.reply_text("Действие отменено", reply_markup=get_main_keyboard())
         return ConversationHandler.END
 
 # ========== ДОБАВЛЕНИЕ ИГРОКА ==========
 
 async def add_player_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
+    
     if name == "❌ Отмена":
+        context.user_data.clear()
         await update.message.reply_text("❌ Отменено", reply_markup=get_main_keyboard())
         return ConversationHandler.END
     
@@ -194,10 +216,10 @@ async def add_player_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
     
     context.user_data['new_name'] = name
-    keyboard = [
-        [InlineKeyboardButton("✅ Да", callback_data="add_yes"),
-         InlineKeyboardButton("❌ Нет", callback_data="add_no")]
-    ]
+    keyboard = [[
+        InlineKeyboardButton("✅ Да", callback_data="add_yes"),
+        InlineKeyboardButton("❌ Нет", callback_data="add_no")
+    ]]
     await update.message.reply_text(f"Добавить «{name}»?", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADD_CONFIRM
 
@@ -221,6 +243,7 @@ async def add_player_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             session.close()
     
     await update.effective_chat.send_message("Меню:", reply_markup=get_main_keyboard())
+    context.user_data.clear()
     return ConversationHandler.END
 
 # ========== НОВАЯ ИГРА ==========
@@ -233,15 +256,10 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Нужно 2+ игроков.", reply_markup=get_main_keyboard())
             return ConversationHandler.END
         
-        keyboard = []
-        for p in players:
-            keyboard.append([InlineKeyboardButton(p.username, callback_data=f"s1_{p.id}")])
+        keyboard = [[InlineKeyboardButton(p.username, callback_data=f"s1_{p.id}")] for p in players]
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
-        await update.message.reply_text(
-            "🎲 Выберите ПЕРВОГО игрока:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🎲 Выберите ПЕРВОГО игрока:", reply_markup=InlineKeyboardMarkup(keyboard))
         return CHOOSE_P1
     finally:
         session.close()
@@ -252,6 +270,7 @@ async def choose_p1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "cancel":
         await query.edit_message_text("❌ Отменено")
+        context.user_data.clear()
         return ConversationHandler.END
     
     p1_id = int(query.data.split('_')[1])
@@ -262,15 +281,10 @@ async def choose_p1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p1 = session.query(Player).get(p1_id)
         players = session.query(Player).filter(Player.id != p1_id).order_by(Player.username).all()
         
-        keyboard = []
-        for p in players:
-            keyboard.append([InlineKeyboardButton(p.username, callback_data=f"s2_{p.id}")])
+        keyboard = [[InlineKeyboardButton(p.username, callback_data=f"s2_{p.id}")] for p in players]
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
-        await query.edit_message_text(
-            f"Первый: {p1.username}\nВыберите ВТОРОГО:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(f"Первый: {p1.username}\nВыберите ВТОРОГО:", reply_markup=InlineKeyboardMarkup(keyboard))
         return CHOOSE_P2
     finally:
         session.close()
@@ -281,6 +295,7 @@ async def choose_p2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "cancel":
         await query.edit_message_text("❌ Отменено")
+        context.user_data.clear()
         return ConversationHandler.END
     
     p2_id = int(query.data.split('_')[1])
@@ -313,11 +328,10 @@ async def choose_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "cancel":
         await query.edit_message_text("❌ Отменено")
+        context.user_data.clear()
         return ConversationHandler.END
     
     data = query.data
-    context.user_data['result'] = data
-    
     session = Session()
     try:
         p1 = session.query(Player).get(context.user_data['p1'])
@@ -326,25 +340,26 @@ async def choose_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "r_win1":
             rtext = f"Победил {p1.username}"
             stext = f"{p1.username} 1 - 0 {p2.username}"
-            context.user_data['pp1'] = 1; context.user_data['pp2'] = 0
-            context.user_data['win'] = p1.id; context.user_data['mars'] = False
+            pp1, pp2, win, mars = 1, 0, p1.id, False
         elif data == "r_mars1":
             rtext = f"МАРС! {p1.username}"
             stext = f"{p1.username} 2 - 0 {p2.username}"
-            context.user_data['pp1'] = 2; context.user_data['pp2'] = 0
-            context.user_data['win'] = p1.id; context.user_data['mars'] = True
+            pp1, pp2, win, mars = 2, 0, p1.id, True
         elif data == "r_win2":
             rtext = f"Победил {p2.username}"
             stext = f"{p1.username} 0 - 1 {p2.username}"
-            context.user_data['pp1'] = 0; context.user_data['pp2'] = 1
-            context.user_data['win'] = p2.id; context.user_data['mars'] = False
+            pp1, pp2, win, mars = 0, 1, p2.id, False
         elif data == "r_mars2":
             rtext = f"МАРС! {p2.username}"
             stext = f"{p1.username} 0 - 2 {p2.username}"
-            context.user_data['pp1'] = 0; context.user_data['pp2'] = 2
-            context.user_data['win'] = p2.id; context.user_data['mars'] = True
+            pp1, pp2, win, mars = 0, 2, p2.id, True
         else:
             return ConversationHandler.END
+        
+        context.user_data['pp1'] = pp1
+        context.user_data['pp2'] = pp2
+        context.user_data['win'] = win
+        context.user_data['mars'] = mars
         
         keyboard = [
             [InlineKeyboardButton("💾 Сохранить", callback_data="save_yes")],
@@ -365,6 +380,7 @@ async def confirm_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data != "save_yes":
         await query.edit_message_text("❌ Отменено")
+        context.user_data.clear()
         return ConversationHandler.END
     
     session = Session()
@@ -376,17 +392,25 @@ async def confirm_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pp1 = context.user_data.get('pp1', 0)
         pp2 = context.user_data.get('pp2', 0)
         
-        p1.games_played += 1; p2.games_played += 1
-        p1.points += pp1; p2.points += pp2
+        p1.games_played += 1
+        p2.games_played += 1
+        p1.points += pp1
+        p2.points += pp2
+        
         if win == p1.id:
             p1.games_won += 1
-            if mars: p1.mars_won += 1
+            if mars:
+                p1.mars_won += 1
         elif win == p2.id:
             p2.games_won += 1
-            if mars: p2.mars_won += 1
+            if mars:
+                p2.mars_won += 1
         
-        session.add(Game(player1_id=p1.id, player2_id=p2.id, winner_id=win,
-                       is_mars=1 if mars else 0, points_p1=pp1, points_p2=pp2))
+        session.add(Game(
+            player1_id=p1.id, player2_id=p2.id,
+            winner_id=win, is_mars=1 if mars else 0,
+            points_p1=pp1, points_p2=pp2
+        ))
         session.commit()
         
         w = session.query(Player).get(win) if win else None
@@ -394,10 +418,12 @@ async def confirm_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wt = f"Победитель: 🎉 {w.username}{mt}" if w else ""
         await query.edit_message_text(f"✅ Сохранено!\n\n{p1.username} {pp1} - {pp2} {p2.username}\n{wt}")
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка сохранения: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
     finally:
         session.close()
+    
+    context.user_data.clear()
     return ConversationHandler.END
 
 # ========== ТАБЛИЦЫ ==========
@@ -409,27 +435,41 @@ async def show_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not players:
             await update.message.reply_text("📊 Нет данных.", reply_markup=get_main_keyboard())
             return
+        
         text = "📊 ТУРНИРНАЯ ТАБЛИЦА\nРезультаты пар:\n\n"
         shown = set()
         has = False
+        
         for p1 in players:
             for p2 in players:
-                if p1.id >= p2.id: continue
+                if p1.id >= p2.id:
+                    continue
+                
                 key = (min(p1.id, p2.id), max(p1.id, p2.id))
-                if key in shown: continue
+                if key in shown:
+                    continue
                 shown.add(key)
+                
                 games = session.query(Game).filter(
-                    ((Game.player1_id==p1.id)&(Game.player2_id==p2.id)) |
-                    ((Game.player1_id==p2.id)&(Game.player2_id==p1.id))
+                    ((Game.player1_id == p1.id) & (Game.player2_id == p2.id)) |
+                    ((Game.player1_id == p2.id) & (Game.player2_id == p1.id))
                 ).all()
+                
                 if games:
                     has = True
                     t1, t2 = 0, 0
                     for g in games:
-                        if g.player1_id == p1.id: t1 += g.points_p1; t2 += g.points_p2
-                        else: t1 += g.points_p2; t2 += g.points_p1
+                        if g.player1_id == p1.id:
+                            t1 += g.points_p1
+                            t2 += g.points_p2
+                        else:
+                            t1 += g.points_p2
+                            t2 += g.points_p1
                     text += f"{p1.username} — {p2.username}: {t1}-{t2}\n"
-        if not has: text += "Нет игр."
+        
+        if not has:
+            text += "Нет игр."
+        
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     finally:
         session.close()
@@ -441,9 +481,11 @@ async def show_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not players:
             await update.message.reply_text("👥 Нет игроков.", reply_markup=get_main_keyboard())
             return
+        
         text = "👥 СПИСОК ИГРОКОВ\n\n"
         for i, p in enumerate(players, 1):
             text += f"{i}. {p.username} — ⭐ {p.points} очк.\n"
+        
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     finally:
         session.close()
@@ -455,17 +497,24 @@ async def show_last_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not games:
             await update.message.reply_text("📋 Нет игр.", reply_markup=get_main_keyboard())
             return
+        
         text = "📋 ПОСЛЕДНИЕ ИГРЫ:\n\n"
         for g in games:
             p1 = session.query(Player).get(g.player1_id)
             p2 = session.query(Player).get(g.player2_id)
-            if not p1 or not p2: continue
+            if not p1 or not p2:
+                continue
+            
             mars = " (МАРС!)" if g.is_mars else ""
-            text += f"📅 {g.game_date.strftime('%d.%m.%Y %H:%M')}\n{p1.username} {g.points_p1} - {g.points_p2} {p2.username}"
+            text += f"📅 {g.game_date.strftime('%d.%m.%Y %H:%M')}\n"
+            text += f"{p1.username} {g.points_p1} - {g.points_p2} {p2.username}"
+            
             if g.winner_id:
                 w = session.query(Player).get(g.winner_id)
-                if w: text += f" → {w.username}{mars}"
+                if w:
+                    text += f" → {w.username}{mars}"
             text += "\n\n"
+        
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     finally:
         session.close()
@@ -475,31 +524,38 @@ async def show_last_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Обработчик ошибок
+    app.add_error_handler(error_handler)
+    
+    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("import", import_data))
     
     # Добавление игрока
-    app.add_handler(ConversationHandler(
+    add_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ Добавить игрока$"), menu_handler)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_player_name)],
             ADD_CONFIRM: [CallbackQueryHandler(add_player_confirm, pattern="^(add_yes|add_no)")]
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Отмена$"), cancel_game)]
-    ))
+        fallbacks=[MessageHandler(filters.Regex("^❌ Отмена$"), cancel_all)]
+    )
+    app.add_handler(add_conv)
     
     # Новая игра
-    app.add_handler(ConversationHandler(
+    game_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🎲 Добавить результат игры$"), menu_handler)],
         states={
-            CHOOSE_P1: [CallbackQueryHandler(choose_p1, pattern="^s1_|^cancel$")],
-            CHOOSE_P2: [CallbackQueryHandler(choose_p2, pattern="^s2_|^cancel$")],
-            CHOOSE_RESULT: [CallbackQueryHandler(choose_result, pattern="^r_|^cancel$")],
+            CHOOSE_P1: [CallbackQueryHandler(choose_p1, pattern="^(s1_|cancel)")],
+            CHOOSE_P2: [CallbackQueryHandler(choose_p2, pattern="^(s2_|cancel)")],
+            CHOOSE_RESULT: [CallbackQueryHandler(choose_result, pattern="^(r_|cancel)")],
             CONFIRM: [CallbackQueryHandler(confirm_game, pattern="^(save_yes|cancel)")]
         },
-        fallbacks=[CommandHandler("cancel", cancel_game)]
-    ))
+        fallbacks=[CommandHandler("cancel", cancel_all)]
+    )
+    app.add_handler(game_conv)
     
+    # Меню
     app.add_handler(MessageHandler(filters.Regex("^(📊 Турнирная таблица|👥 Список игроков|📋 Последние игры)$"), menu_handler))
     
     logger.info("БОТ ЗАПУЩЕН!")
