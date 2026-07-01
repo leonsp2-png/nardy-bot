@@ -147,8 +147,8 @@ async def import_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Определяем победителя и турнирные очки
             if s1 > s2:
-                winner_id, tp1, tp2 = None, 1, 0  # пока None, установим после создания игроков
-                is_mars = 1 if (s1 - s2) >= 13 else 0  # марс — разгромное поражение (условно)
+                winner_id, tp1, tp2 = None, 1, 0
+                is_mars = 1 if (s1 - s2) >= 13 else 0
             elif s2 > s1:
                 winner_id, tp1, tp2 = None, 0, 1
                 is_mars = 1 if (s2 - s1) >= 13 else 0
@@ -405,7 +405,7 @@ async def add_player(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
     context.user_data.clear()
 
-# ========== НОВАЯ ИГРА (ИСПРАВЛЕНА ЗАЩИТА ОТ ДУБЛЕЙ) ==========
+# ========== НОВАЯ ИГРА ==========
 
 async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = Session()
@@ -431,11 +431,11 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-# ========== CALLBACK ОБРАБОТЧИК (ИСПРАВЛЕНО ЗАВИСАНИЕ) ==========
+# ========== CALLBACK ОБРАБОТЧИК ==========
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Всегда отвечаем Telegram, чтобы убрать "часы"
+    await query.answer()
     
     data = query.data
     state = context.user_data.get('state', '')
@@ -447,7 +447,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"CALLBACK: data={data}, state={state}")
     
-    # Обработка устаревших callback'ов (после перезапуска или отмены)
+    # Обработка устаревших callback'ов
     if not state and data != "cancel":
         await safe_edit_message(query, "⌛ Сессия устарела. Начните заново: /start")
         return
@@ -550,15 +550,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('processing', None)
         return
     
-    # === Шаг 4: Сохранение (КРИТИЧЕСКИ ВАЖНО — ЗАЩИТА ОТ ДУБЛЕЙ) ===
+    # === Шаг 4: Сохранение ===
     if state == 'confirm' and data == 'save':
-        # Проверяем, не сохранили ли уже
         if context.user_data.get('saved'):
             await query.answer("✅ Уже сохранено!", show_alert=False)
             return
         
         context.user_data['processing'] = True
-        context.user_data['saved'] = True  # Блокировка повторного сохранения
+        context.user_data['saved'] = True
         
         session = Session()
         try:
@@ -569,7 +568,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pp1 = context.user_data.get('pp1', 0)
             pp2 = context.user_data.get('pp2', 0)
             
-            # Обновляем статистику
             p1.games_played += 1
             p2.games_played += 1
             p1.points += pp1
@@ -606,75 +604,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except Exception as e:
             session.rollback()
-            # Разблокируем при ошибке
             context.user_data.pop('saved', None)
             logger.error(f"Ошибка сохранения: {e}")
             await safe_edit_message(query, f"❌ Ошибка сохранения: {e}")
         finally:
             session.close()
             context.user_data.pop('processing', None)
-            # Не очищаем user_data сразу — даём время на ответ Telegram
-            # Очистка произойдёт при следующем взаимодействии или через /start
         return
     
-    # Неизвестный callback
     logger.warning(f"Необработанный callback: {data}, state={state}")
     await query.answer("Неизвестная команда", show_alert=False)
 
-# ========== ТАБЛИЦЫ (ИСПРАВЛЕН N+1) ==========
+# ========== ТАБЛИЦЫ (ВЕРНУТА ОРИГИНАЛЬНАЯ ЛОГИКА) ==========
 
 async def show_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = Session()
     try:
-        players = {p.id: p for p in session.query(Player).all()}
+        players = session.query(Player).order_by(Player.points.desc()).all()
         if not players:
             await update.message.reply_text("📊 Нет данных.", reply_markup=get_main_keyboard())
             return
         
-        # Оптимизированный запрос: считаем очки по парам в БД
-        from sqlalchemy import case, func
+        text, shown, has = "📊 ТУРНИРНАЯ ТАБЛИЦА\n\n", set(), False
         
-        results = session.query(
-            func.min(Game.player1_id).label('p1'),
-            func.max(Game.player1_id).label('p2'),  # на самом деле нужен GREATEST/LEAST
-            func.sum(case((Game.player1_id < Game.player2_id, Game.points_p1), else_=Game.points_p2)).label('tp1'),
-            func.sum(case((Game.player1_id < Game.player2_id, Game.points_p2), else_=Game.points_p1)).label('tp2'),
-            func.count(Game.id).label('games')
-        ).filter(
-            Game.winner_id.isnot(None)
-        ).group_by(
-            func.min(Game.player1_id, Game.player2_id),
-            func.max(Game.player1_id, Game.player2_id)
-        ).all()
+        for p1 in players:
+            for p2 in players:
+                if p1.id >= p2.id:
+                    continue
+                key = (min(p1.id, p2.id), max(p1.id, p2.id))
+                if key in shown:
+                    continue
+                shown.add(key)
+                
+                games = session.query(Game).filter(
+                    ((Game.player1_id == p1.id) & (Game.player2_id == p2.id)) |
+                    ((Game.player1_id == p2.id) & (Game.player2_id == p1.id))
+                ).all()
+                
+                if games:
+                    has = True
+                    t1, t2 = 0, 0
+                    for g in games:
+                        if g.player1_id == p1.id:
+                            t1 += g.points_p1
+                            t2 += g.points_p2
+                        else:
+                            t1 += g.points_p2
+                            t2 += g.points_p1
+                    text += f"{p1.username} — {p2.username}: {t1}-{t2}\n"
         
-        # Упрощённый вариант — просто загружаем все игры и считаем в Python
-        # (для небольшого количества игр это быстрее)
-        games = session.query(Game).filter(Game.winner_id.isnot(None)).all()
-        
-        h2h = {}  # (id1, id2) -> (tp1, tp2, games)
-        for g in games:
-            id1, id2 = min(g.player1_id, g.player2_id), max(g.player1_id, g.player2_id)
-            key = (id1, id2)
-            if key not in h2h:
-                h2h[key] = [0, 0, 0]
-            
-            if g.player1_id == id1:
-                h2h[key][0] += g.points_p1
-                h2h[key][1] += g.points_p2
-            else:
-                h2h[key][0] += g.points_p2
-                h2h[key][1] += g.points_p1
-            h2h[key][2] += 1
-        
-        if not h2h:
-            await update.message.reply_text("📊 ТУРНИРНАЯ ТАБЛИЦА\n\nПока нет сыгранных игр.", reply_markup=get_main_keyboard())
-            return
-        
-        text = "📊 ТУРНИРНАЯ ТАБЛИЦА (личные встречи)\n\n"
-        for (id1, id2), (tp1, tp2, cnt) in sorted(h2h.items(), key=lambda x: -x[1][2]):
-            p1_name = players.get(id1, Player(username="?")).username
-            p2_name = players.get(id2, Player(username="?")).username
-            text += f"{p1_name} — {p2_name}: {tp1}-{tp2} ({cnt} игр)\n"
+        if not has:
+            text += "Нет игр."
         
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
         
@@ -684,19 +664,14 @@ async def show_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = Session()
     try:
-        players = session.query(Player).order_by(Player.points.desc(), Player.games_won.desc()).all()
+        players = session.query(Player).order_by(Player.points.desc()).all()
         if not players:
             await update.message.reply_text("👥 Нет игроков.", reply_markup=get_main_keyboard())
             return
         
         text = "👥 СПИСОК ИГРОКОВ\n\n"
         for i, p in enumerate(players, 1):
-            win_rate = (p.games_won / p.games_played * 100) if p.games_played > 0 else 0
-            text += (
-                f"{i}. {p.username}\n"
-                f"   ⭐ {p.points} очк. | {p.games_won} побед"
-                f" | {p.mars_won} марсов | {win_rate:.0f}% побед\n\n"
-            )
+            text += f"{i}. {p.username} — ⭐ {p.points} очк.\n"
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     finally:
         session.close()
@@ -709,28 +684,20 @@ async def show_last_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📋 Нет игр.", reply_markup=get_main_keyboard())
             return
         
-        # Предзагружаем игроков одним запросом
-        player_ids = set()
-        for g in games:
-            player_ids.update([g.player1_id, g.player2_id, g.winner_id or 0])
-        
-        players = {p.id: p for p in session.query(Player).filter(Player.id.in_(player_ids)).all()}
-        
         text = "📋 ПОСЛЕДНИЕ ИГРЫ:\n\n"
         for g in games:
-            p1 = players.get(g.player1_id)
-            p2 = players.get(g.player2_id)
+            p1 = session.query(Player).get(g.player1_id)
+            p2 = session.query(Player).get(g.player2_id)
             if not p1 or not p2:
                 continue
             
             mars = " (МАРС!)" if g.is_mars else ""
-            w = players.get(g.winner_id)
-            w_text = f" → 🎉 {w.username}{mars}" if w else ""
-            
-            text += (
-                f"📅 {g.game_date.strftime('%d.%m.%Y %H:%M')}\n"
-                f"{p1.username} {g.points_p1}-{g.points_p2} {p2.username}{w_text}\n\n"
-            )
+            text += f"📅 {g.game_date.strftime('%d.%m.%Y %H:%M')}\n{p1.username} {g.points_p1}-{g.points_p2} {p2.username}"
+            if g.winner_id:
+                w = session.query(Player).get(g.winner_id)
+                if w:
+                    text += f" → {w.username}{mars}"
+            text += "\n\n"
         
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     finally:
@@ -750,7 +717,6 @@ def main():
     
     logger.info("БОТ ЗАПУЩЕН!")
     
-    # drop_pending_updates=True — игнорируем старые callback'и при перезапуске
     app.run_polling(
         poll_interval=0.5,
         timeout=30,
